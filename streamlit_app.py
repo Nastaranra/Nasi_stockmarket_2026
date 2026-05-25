@@ -10,8 +10,6 @@ import plotly.graph_objects as go
 
 from datetime import datetime, timedelta
 
-from io import StringIO
-
 
 
 st.set_page_config(page_title="AI Trading Signal App", layout="wide")
@@ -22,23 +20,17 @@ st.title("📈 AI Trading Signal App")
 
 st.caption("Professional AI Trading Dashboard")
 
-st.warning("Educational only. Not financial advice.")
+st.warning("Educational only. Not financial advice. No signal is guaranteed.")
 
 
+
+ALPHA_KEY = st.secrets.get("ALPHA_VANTAGE_API_KEY", "")
 
 FINNHUB_API_KEY = st.secrets.get("FINNHUB_API_KEY", "")
 
 
 
-TICKERS = [
-
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL",
-
-    "META", "TSLA", "NFLX", "AMD", "SPY",
-
-    "QQQ", "PLTR", "SMCI", "AVGO", "CRM"
-
-]
+TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "NFLX", "AMD", "SPY", "QQQ", "PLTR", "SMCI", "AVGO", "CRM"]
 
 
 
@@ -58,45 +50,85 @@ def safe_num(x, default=0):
 
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=3600)
 
-def load_price_data(ticker, days=365):
+def load_price_data(ticker):
+
+    if not ALPHA_KEY:
+
+        return pd.DataFrame(), "Missing Alpha Vantage API key"
+
+
 
     try:
 
-        stooq_symbol = ticker.lower() + ".us"
+        url = "https://www.alphavantage.co/query"
 
-        url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=d"
+        params = {
 
+            "function": "TIME_SERIES_DAILY_ADJUSTED",
 
+            "symbol": ticker,
 
-        response = requests.get(url, timeout=20)
+            "outputsize": "full",
 
+            "apikey": ALPHA_KEY
 
-
-        if response.status_code != 200:
-
-            return pd.DataFrame(), f"HTTP {response.status_code}"
-
-
-
-        df = pd.read_csv(StringIO(response.text))
+        }
 
 
 
-        if df.empty or "Close" not in df.columns:
+        r = requests.get(url, params=params, timeout=30)
 
-            return pd.DataFrame(), "No price data returned from Stooq"
-
-
-
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-
-        df = df.dropna(subset=["Date", "Close"])
+        data = r.json()
 
 
 
-        cutoff = datetime.now() - timedelta(days=days)
+        if "Note" in data:
+
+            return pd.DataFrame(), "Alpha Vantage API limit reached. Try again later."
+
+
+
+        if "Error Message" in data:
+
+            return pd.DataFrame(), data["Error Message"]
+
+
+
+        ts = data.get("Time Series (Daily)")
+
+        if not ts:
+
+            return pd.DataFrame(), f"No price data returned. Response: {data}"
+
+
+
+        rows = []
+
+        for date, values in ts.items():
+
+            rows.append({
+
+                "Date": pd.to_datetime(date),
+
+                "Open": float(values["1. open"]),
+
+                "High": float(values["2. high"]),
+
+                "Low": float(values["3. low"]),
+
+                "Close": float(values["4. close"]),
+
+                "Volume": float(values["6. volume"])
+
+            })
+
+
+
+        df = pd.DataFrame(rows).sort_values("Date")
+
+        cutoff = datetime.now() - timedelta(days=365)
 
         df = df[df["Date"] >= cutoff]
 
@@ -148,8 +180,6 @@ def add_indicators(df):
 
     avg_loss = loss.rolling(14, min_periods=5).mean()
 
-
-
     rs = avg_gain / avg_loss.replace(0, np.nan)
 
     df["RSI"] = 100 - (100 / (1 + rs))
@@ -159,8 +189,6 @@ def add_indicators(df):
     exp1 = df["Close"].ewm(span=12, adjust=False).mean()
 
     exp2 = df["Close"].ewm(span=26, adjust=False).mean()
-
-
 
     df["MACD"] = exp1 - exp2
 
@@ -173,8 +201,6 @@ def add_indicators(df):
     tr2 = (df["High"] - df["Close"].shift()).abs()
 
     tr3 = (df["Low"] - df["Close"].shift()).abs()
-
-
 
     df["TR"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
@@ -206,7 +232,7 @@ def load_fundamentals(ticker):
 
     if not FINNHUB_API_KEY:
 
-        return {}, "Missing Finnhub API key"
+        return {}, "No Finnhub API key"
 
 
 
@@ -214,17 +240,17 @@ def load_fundamentals(ticker):
 
         url = f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={FINNHUB_API_KEY}"
 
-        response = requests.get(url, timeout=20)
+        r = requests.get(url, timeout=20)
 
 
 
-        if response.status_code != 200:
+        if r.status_code != 200:
 
-            return {}, f"HTTP {response.status_code}"
+            return {}, f"HTTP {r.status_code}"
 
 
 
-        metric = response.json().get("metric", {})
+        metric = r.json().get("metric", {})
 
 
 
@@ -262,7 +288,7 @@ def load_news_sentiment(ticker):
 
     if not FINNHUB_API_KEY:
 
-        return pd.DataFrame(), 0, "No API Key"
+        return pd.DataFrame(), 0, "No Finnhub API key"
 
 
 
@@ -276,33 +302,19 @@ def load_news_sentiment(ticker):
 
         url = "https://finnhub.io/api/v1/company-news"
 
-        params = {
+        params = {"symbol": ticker, "from": str(start), "to": str(today), "token": FINNHUB_API_KEY}
 
-            "symbol": ticker,
-
-            "from": str(start),
-
-            "to": str(today),
-
-            "token": FINNHUB_API_KEY
-
-        }
+        r = requests.get(url, params=params, timeout=20)
 
 
 
-        response = requests.get(url, params=params, timeout=20)
+        if r.status_code != 200:
+
+            return pd.DataFrame(), 0, f"HTTP {r.status_code}"
 
 
 
-        if response.status_code != 200:
-
-            return pd.DataFrame(), 0, f"HTTP {response.status_code}"
-
-
-
-        news = response.json()
-
-
+        news = r.json()
 
         if not news:
 
@@ -310,27 +322,9 @@ def load_news_sentiment(ticker):
 
 
 
-        positive_words = [
+        positive_words = ["beat", "growth", "strong", "upgrade", "surge", "record", "profit", "higher", "bullish", "positive", "gain", "rally", "outperform", "raises", "increase", "ai", "partnership"]
 
-            "beat", "growth", "strong", "upgrade", "surge", "record",
-
-            "profit", "higher", "bullish", "positive", "gain", "rally",
-
-            "outperform", "raises", "increase", "ai", "partnership"
-
-        ]
-
-
-
-        negative_words = [
-
-            "miss", "drop", "fall", "lawsuit", "weak", "downgrade",
-
-            "loss", "lower", "bearish", "negative", "decline", "cut",
-
-            "warning", "risk", "investigation", "delay"
-
-        ]
+        negative_words = ["miss", "drop", "fall", "lawsuit", "weak", "downgrade", "loss", "lower", "bearish", "negative", "decline", "cut", "warning", "risk", "investigation", "delay"]
 
 
 
@@ -353,8 +347,6 @@ def load_news_sentiment(ticker):
             pos = sum(1 for w in positive_words if w in text)
 
             neg = sum(1 for w in negative_words if w in text)
-
-
 
             score = pos - neg
 
@@ -406,7 +398,7 @@ def load_news_sentiment(ticker):
 
     except Exception as e:
 
-        return pd.DataFrame(), 0, f"News Error: {e}"
+        return pd.DataFrame(), 0, str(e)
 
 
 
@@ -610,8 +602,6 @@ def estimate_future_price(df, days):
 
     volatility = returns.std()
 
-
-
     last_price = recent["Close"].iloc[-1]
 
 
@@ -638,6 +628,8 @@ def estimate_future_price(df, days):
 
 
 
+    label = "Neutral Estimate"
+
     if expected_return >= 0.08:
 
         label = "Strong Positive Estimate"
@@ -653,10 +645,6 @@ def estimate_future_price(df, days):
     elif expected_return <= -0.03:
 
         label = "Negative Estimate"
-
-    else:
-
-        label = "Neutral Estimate"
 
 
 
@@ -818,21 +806,7 @@ def trade_plan(latest, signal, confidence, expected_return, horizon_days):
 
 
 
-    if horizon_days <= 5:
-
-        hold = "1-5 days"
-
-    elif horizon_days <= 14:
-
-        hold = "5-14 days"
-
-    elif horizon_days <= 60:
-
-        hold = "2-8 weeks"
-
-    else:
-
-        hold = "2-6 months"
+    hold = "1-5 days" if horizon_days <= 5 else "5-14 days" if horizon_days <= 14 else "2-8 weeks" if horizon_days <= 60 else "2-6 months"
 
 
 
@@ -862,8 +836,6 @@ def make_price_chart(df, ticker):
 
     fig = go.Figure()
 
-
-
     fig.add_trace(go.Scatter(x=df["Date"], y=df["Close"], mode="lines", name="Close"))
 
     fig.add_trace(go.Scatter(x=df["Date"], y=df["MA9"], mode="lines", name="MA9"))
@@ -874,21 +846,7 @@ def make_price_chart(df, ticker):
 
     fig.add_trace(go.Scatter(x=df["Date"], y=df["MA200"], mode="lines", name="MA200"))
 
-
-
-    fig.update_layout(
-
-        title=f"{ticker} Price Chart",
-
-        xaxis_title="Date",
-
-        yaxis_title="Price",
-
-        height=500
-
-    )
-
-
+    fig.update_layout(title=f"{ticker} Price Chart", xaxis_title="Date", yaxis_title="Price", height=500)
 
     return fig
 
@@ -896,7 +854,7 @@ def make_price_chart(df, ticker):
 
 def analyze_stock(ticker, horizon_days):
 
-    df, price_error = load_price_data(ticker, days=365)
+    df, price_error = load_price_data(ticker)
 
 
 
@@ -924,8 +882,6 @@ def analyze_stock(ticker, horizon_days):
 
     estimate_df, expected_return, forecast_label = estimate_future_price(df, horizon_days)
 
-
-
     latest = df.iloc[-1]
 
 
@@ -952,7 +908,7 @@ def analyze_stock(ticker, horizon_days):
 
 
 
-    result = {
+    return {
 
         "df": df,
 
@@ -994,11 +950,7 @@ def analyze_stock(ticker, horizon_days):
 
         "reasons": tech_reasons + fund_reasons
 
-    }
-
-
-
-    return result, ""
+    }, ""
 
 
 
@@ -1034,6 +986,14 @@ scan_count = st.sidebar.selectbox(
 
 
 
+if not ALPHA_KEY:
+
+    st.error("ALPHA_VANTAGE_API_KEY is missing. Add it in Streamlit Secrets.")
+
+    st.stop()
+
+
+
 tab1, tab2, tab3 = st.tabs(["Single Stock", "Scanner", "Ticker List"])
 
 
@@ -1059,8 +1019,6 @@ with tab1:
 
 
         c1, c2, c3, c4, c5 = st.columns(5)
-
-
 
         c1.metric("Current Price", f"${latest['Close']:.2f}")
 
@@ -1098,19 +1056,7 @@ with tab1:
 
             "Category": ["Technical", "Fundamental", "Forecast", "News", "Total"],
 
-            "Score": [
-
-                result["tech_score"],
-
-                result["fund_score"],
-
-                result["forecast_score"],
-
-                result["news_component"],
-
-                result["total_score"]
-
-            ]
+            "Score": [result["tech_score"], result["fund_score"], result["forecast_score"], result["news_component"], result["total_score"]]
 
         })
 
@@ -1130,19 +1076,7 @@ with tab1:
 
         if result["fundamentals"]:
 
-            st.dataframe(
-
-                pd.DataFrame({
-
-                    "Metric": list(result["fundamentals"].keys()),
-
-                    "Value": list(result["fundamentals"].values())
-
-                }),
-
-                use_container_width=True
-
-            )
+            st.dataframe(pd.DataFrame({"Metric": list(result["fundamentals"].keys()), "Value": list(result["fundamentals"].values())}), use_container_width=True)
 
         else:
 
@@ -1175,8 +1109,6 @@ with tab2:
     rows = []
 
     progress = st.progress(0)
-
-
 
     selected_scan = TICKERS[:scan_count]
 
@@ -1224,8 +1156,6 @@ with tab2:
 
         scanner_df = pd.DataFrame(rows)
 
-
-
         order = {
 
             "Strong Buy": 1,
@@ -1248,17 +1178,7 @@ with tab2:
 
         scanner_df["Sort"] = scanner_df["Signal"].map(order).fillna(9)
 
-
-
-        scanner_df = scanner_df.sort_values(
-
-            ["Sort", "Confidence", "Total Score"],
-
-            ascending=[True, False, False]
-
-        ).drop(columns=["Sort"])
-
-
+        scanner_df = scanner_df.sort_values(["Sort", "Confidence", "Total Score"], ascending=[True, False, False]).drop(columns=["Sort"])
 
         st.dataframe(scanner_df, use_container_width=True)
 
