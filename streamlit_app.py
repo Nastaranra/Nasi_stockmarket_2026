@@ -70,7 +70,7 @@ def load_price_data(ticker):
 
             "symbol": ticker,
 
-            "outputsize": "full",
+            "outputsize": "compact",
 
             "apikey": ALPHA_KEY
 
