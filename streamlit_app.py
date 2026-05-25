@@ -79,25 +79,41 @@ def load_price_data(ticker):
         if df is None or df.empty:
             return pd.DataFrame(), f"No price data found for {ticker}"
 
-        df = df.reset_index()
+        # Fix yfinance output safely
+        df = df.copy()
 
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            df.columns = [col[0] for col in df.columns]
 
-        rename_map = {
-            "Adj Close": "Adj_Close"
-        }
+        df = df.reset_index()
 
-        df = df.rename(columns=rename_map)
+        # Different yfinance versions may name the date column differently
+        if "Date" not in df.columns:
+            if "Datetime" in df.columns:
+                df = df.rename(columns={"Datetime": "Date"})
+            elif "index" in df.columns:
+                df = df.rename(columns={"index": "Date"})
+            else:
+                df.insert(0, "Date", pd.to_datetime(df.index))
+
+        # Sometimes Close can be missing but Adj Close exists
+        if "Close" not in df.columns and "Adj Close" in df.columns:
+            df["Close"] = df["Adj Close"]
 
         required_cols = ["Date", "Open", "High", "Low", "Close", "Volume"]
 
-        for col in required_cols:
-            if col not in df.columns:
-                return pd.DataFrame(), f"Missing column {col} for {ticker}"
+        missing_cols = [col for col in required_cols if col not in df.columns]
+
+        if missing_cols:
+            return pd.DataFrame(), f"Missing columns {missing_cols} for {ticker}. Available columns: {list(df.columns)}"
 
         df = df[required_cols].copy()
-        df["Date"] = pd.to_datetime(df["Date"])
+
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
         df = df.sort_values("Date")
         df = df.dropna(subset=["Date", "Open", "High", "Low", "Close"])
 
