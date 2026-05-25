@@ -73,7 +73,7 @@ def load_price_data(ticker):
         params = {
             "function": "TIME_SERIES_DAILY",
             "symbol": ticker,
-            "outputsize": "full",
+            "outputsize": "compact",
             "apikey": ALPHA_KEY
         }
 
