@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import yfinance as yf
 import requests
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
@@ -8,11 +9,8 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="AI Trading Signal App", layout="wide")
 
 st.title("📈 AI Trading Signal App")
-st.caption("Professional AI Trading Dashboard | Short-Term + Long-Term + Scanner")
+st.caption("Short-Term + Long-Term + Scanner | Yahoo Finance Version")
 st.warning("Educational only. Not financial advice. No signal is guaranteed.")
-
-ALPHA_KEY = st.secrets.get("ALPHA_VANTAGE_API_KEY", "")
-FINNHUB_API_KEY = st.secrets.get("FINNHUB_API_KEY", "")
 
 DEFAULT_TICKERS = [
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA",
@@ -20,7 +18,8 @@ DEFAULT_TICKERS = [
     "MU", "INTC", "UBER", "SHOP", "COIN", "SOFI", "PYPL", "ADBE",
     "SNOW", "PANW", "MSTR", "ARM", "BABA", "DIS", "NKE", "COST",
     "WMT", "TGT", "JPM", "BAC", "V", "MA", "UNH", "LLY", "XOM",
-    "CVX", "HOOD", "RIVN", "LCID", "NIO"
+    "CVX", "HOOD", "RIVN", "LCID", "NIO", "F", "GM", "BA", "GE",
+    "T", "VZ", "PFE", "MRNA", "KO", "PEP", "SBUX", "ORCL", "IBM"
 ]
 
 
@@ -44,15 +43,16 @@ def get_all_tickers():
 
     for url in urls:
         try:
-            response = requests.get(url, timeout=30)
+            response = requests.get(url, timeout=15)
             lines = response.text.splitlines()
 
             for line in lines[1:]:
                 parts = line.split("|")
+
                 if len(parts) > 1:
                     symbol = parts[0].strip()
 
-                    if symbol.isalpha() and len(symbol) <= 5:
+                    if symbol.isalpha() and 1 <= len(symbol) <= 5:
                         tickers.add(symbol)
 
         except Exception:
@@ -64,56 +64,45 @@ def get_all_tickers():
 ALL_TICKERS = get_all_tickers()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=900)
 def load_price_data(ticker):
-    if not ALPHA_KEY:
-        return pd.DataFrame(), "Missing Alpha Vantage API key. Add ALPHA_VANTAGE_API_KEY in Streamlit Secrets."
-
     try:
-        url = "https://www.alphavantage.co/query"
+        df = yf.download(
+            ticker,
+            period="2y",
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=False
+        )
 
-        params = {
-            "function": "TIME_SERIES_DAILY",
-            "symbol": ticker,
-            "outputsize": "compact",
-            "apikey": ALPHA_KEY
+        if df is None or df.empty:
+            return pd.DataFrame(), f"No price data found for {ticker}"
+
+        df = df.reset_index()
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+
+        rename_map = {
+            "Adj Close": "Adj_Close"
         }
 
-        response = requests.get(url, params=params, timeout=30)
-        data = response.json()
+        df = df.rename(columns=rename_map)
 
-        if "Note" in data:
-            return pd.DataFrame(), "Alpha Vantage API limit reached. Try again later."
+        required_cols = ["Date", "Open", "High", "Low", "Close", "Volume"]
 
-        if "Information" in data:
-            return pd.DataFrame(), data["Information"]
+        for col in required_cols:
+            if col not in df.columns:
+                return pd.DataFrame(), f"Missing column {col} for {ticker}"
 
-        if "Error Message" in data:
-            return pd.DataFrame(), data["Error Message"]
-
-        time_series = data.get("Time Series (Daily)")
-
-        if not time_series:
-            return pd.DataFrame(), f"No price data returned: {data}"
-
-        rows = []
-
-        for date, values in time_series.items():
-            rows.append({
-                "Date": pd.to_datetime(date),
-                "Open": float(values.get("1. open", np.nan)),
-                "High": float(values.get("2. high", np.nan)),
-                "Low": float(values.get("3. low", np.nan)),
-                "Close": float(values.get("4. close", np.nan)),
-                "Volume": float(values.get("5. volume", 0))
-            })
-
-        df = pd.DataFrame(rows)
+        df = df[required_cols].copy()
+        df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date")
         df = df.dropna(subset=["Date", "Open", "High", "Low", "Close"])
 
         if df.empty:
-            return pd.DataFrame(), "Empty dataframe after cleaning."
+            return pd.DataFrame(), f"Empty data after cleaning for {ticker}"
 
         return df, ""
 
@@ -137,8 +126,8 @@ def add_indicators(df):
 
     avg_gain = gain.rolling(14, min_periods=5).mean()
     avg_loss = loss.rolling(14, min_periods=5).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
 
+    rs = avg_gain / avg_loss.replace(0, np.nan)
     df["RSI"] = 100 - (100 / (1 + rs))
 
     exp1 = df["Close"].ewm(span=12, adjust=False).mean()
@@ -164,123 +153,7 @@ def add_indicators(df):
     return df.dropna()
 
 
-@st.cache_data(ttl=1800)
-def load_fundamentals(ticker):
-    if not FINNHUB_API_KEY:
-        return {}, "No Finnhub API key."
-
-    try:
-        url = "https://finnhub.io/api/v1/stock/metric"
-
-        params = {
-            "symbol": ticker,
-            "metric": "all",
-            "token": FINNHUB_API_KEY
-        }
-
-        response = requests.get(url, params=params, timeout=20)
-
-        if response.status_code != 200:
-            return {}, f"HTTP {response.status_code}"
-
-        metric = response.json().get("metric", {})
-
-        return {
-            "Market Cap": metric.get("marketCapitalization"),
-            "P/E Ratio": metric.get("peBasicExclExtraTTM"),
-            "Forward P/E": metric.get("forwardPE"),
-            "Profit Margin": metric.get("netProfitMarginTTM"),
-            "Revenue Growth": metric.get("revenueGrowthTTMYoy"),
-            "Debt to Equity": metric.get("totalDebt/totalEquityQuarterly"),
-            "ROE": metric.get("roeTTM"),
-            "Beta": metric.get("beta")
-        }, ""
-
-    except Exception as e:
-        return {}, str(e)
-
-
-@st.cache_data(ttl=1800)
-def load_news_sentiment(ticker):
-    if not FINNHUB_API_KEY:
-        return pd.DataFrame(), 0, "No Finnhub API key."
-
-    try:
-        today = datetime.today().date()
-        start = today - timedelta(days=7)
-
-        url = "https://finnhub.io/api/v1/company-news"
-
-        params = {
-            "symbol": ticker,
-            "from": str(start),
-            "to": str(today),
-            "token": FINNHUB_API_KEY
-        }
-
-        response = requests.get(url, params=params, timeout=20)
-
-        if response.status_code != 200:
-            return pd.DataFrame(), 0, f"HTTP {response.status_code}"
-
-        news = response.json()
-
-        if not news:
-            return pd.DataFrame(), 0, "No recent news."
-
-        positive_words = [
-            "beat", "growth", "strong", "upgrade", "surge", "record",
-            "profit", "higher", "bullish", "positive", "gain", "rally",
-            "outperform", "raises", "increase", "ai", "partnership"
-        ]
-
-        negative_words = [
-            "miss", "drop", "fall", "lawsuit", "weak", "downgrade",
-            "loss", "lower", "bearish", "negative", "decline", "cut",
-            "warning", "risk", "investigation", "delay"
-        ]
-
-        rows = []
-        total_score = 0
-
-        for item in news[:15]:
-            headline = str(item.get("headline", ""))
-            summary = str(item.get("summary", ""))
-
-            text = (headline + " " + summary).lower()
-
-            pos = sum(1 for w in positive_words if w in text)
-            neg = sum(1 for w in negative_words if w in text)
-
-            score = pos - neg
-            total_score += score
-
-            sentiment = "Positive" if score > 0 else "Negative" if score < 0 else "Neutral"
-
-            rows.append({
-                "Date": datetime.fromtimestamp(item.get("datetime")).strftime("%Y-%m-%d") if item.get("datetime") else None,
-                "Headline": headline,
-                "Sentiment": sentiment,
-                "Source": item.get("source"),
-                "URL": item.get("url")
-            })
-
-        avg_score = total_score / max(len(rows), 1)
-
-        if avg_score > 0.25:
-            label = "Positive News"
-        elif avg_score < -0.25:
-            label = "Negative News"
-        else:
-            label = "Neutral News"
-
-        return pd.DataFrame(rows), avg_score, label
-
-    except Exception as e:
-        return pd.DataFrame(), 0, str(e)
-
-
-def technical_score_only(latest, term_type):
+def score_stock(latest, term_type):
     score = 0
     reasons = []
 
@@ -312,11 +185,11 @@ def technical_score_only(latest, term_type):
 
     if ma9 > ma20:
         score += 1
-        reasons.append("Short-term moving average trend is positive.")
+        reasons.append("Short-term trend is positive.")
 
     if ma20 > ma50:
         score += 1
-        reasons.append("Medium-term moving average trend is positive.")
+        reasons.append("Medium-term trend is positive.")
 
     if ma50 > ma200:
         score += 2 if term_type == "Long-Term" else 1
@@ -331,7 +204,7 @@ def technical_score_only(latest, term_type):
         reasons.append("RSI is healthy.")
     elif rsi > 75:
         score -= 1
-        reasons.append("RSI is very overbought.")
+        reasons.append("RSI is overbought.")
     elif rsi < 32:
         score -= 1
         reasons.append("RSI is weak or oversold.")
@@ -350,51 +223,14 @@ def technical_score_only(latest, term_type):
     return score, risk, reasons
 
 
-def fundamental_score_only(fundamentals):
-    score = 0
-    reasons = []
-
-    pe = safe_num(fundamentals.get("P/E Ratio"), None)
-    fpe = safe_num(fundamentals.get("Forward P/E"), None)
-    margin = safe_num(fundamentals.get("Profit Margin"), None)
-    growth = safe_num(fundamentals.get("Revenue Growth"), None)
-    debt = safe_num(fundamentals.get("Debt to Equity"), None)
-    roe = safe_num(fundamentals.get("ROE"), None)
-
-    if pe is not None and 0 < pe < 45:
-        score += 1
-        reasons.append("P/E ratio is acceptable.")
-
-    if fpe is not None and 0 < fpe < 45:
-        score += 1
-        reasons.append("Forward P/E is acceptable.")
-
-    if margin is not None and margin > 8:
-        score += 1
-        reasons.append("Profit margin is strong.")
-
-    if growth is not None and growth > 5:
-        score += 1
-        reasons.append("Revenue growth is positive.")
-
-    if debt is not None and debt < 220:
-        score += 1
-        reasons.append("Debt-to-equity is manageable.")
-
-    if roe is not None and roe > 10:
-        score += 1
-        reasons.append("ROE is strong.")
-
-    return score, reasons
-
-
 def estimate_future_price(df, days):
     recent = df.tail(100).copy()
 
     if len(recent) < 30:
-        return pd.DataFrame(), 0, "Not enough data."
+        return pd.DataFrame(), 0, "Not enough data"
 
     returns = recent["Close"].pct_change().dropna()
+
     avg_return = returns.mean()
     volatility = returns.std()
     last_price = recent["Close"].iloc[-1]
@@ -434,40 +270,37 @@ def estimate_future_price(df, days):
     return out, expected_return, label
 
 
-def final_signal(total_score, risk, news_score, expected_return, term_type):
-    if risk == "High" and total_score < 8:
+def final_signal(score, risk, expected_return, term_type):
+    if risk == "High" and score < 6:
         return "⚠️ Avoid / High Risk"
 
-    if news_score < -0.25 and total_score < 9:
-        return "⚠️ Avoid / Negative News"
-
     if term_type == "Short-Term":
-        if total_score >= 13 and expected_return > 0:
+        if score >= 8 and expected_return > 0:
             return "🔥 Strong Buy"
-        elif total_score >= 10 and expected_return > 0:
+        elif score >= 6 and expected_return > 0:
             return "✅ Buy Signal"
-        elif total_score >= 7:
+        elif score >= 4:
             return "📉 Buy on Dip"
-        elif total_score >= 4:
+        elif score >= 2:
             return "⏳ Hold / Wait"
         else:
             return "🔻 Sell / High Caution"
 
     else:
-        if total_score >= 14 and expected_return > 0:
+        if score >= 9 and expected_return > 0:
             return "🚀 Strong Long-Term Buy"
-        elif total_score >= 11 and expected_return > 0:
+        elif score >= 7 and expected_return > 0:
             return "✅ Long-Term Buy"
-        elif total_score >= 8:
+        elif score >= 5:
             return "📉 Long-Term Buy on Dip"
-        elif total_score >= 5:
+        elif score >= 3:
             return "⏳ Long-Term Hold / Watch"
         else:
             return "⚠️ Avoid Long-Term"
 
 
-def confidence_score(total_score, risk, expected_return, news_score):
-    confidence = 45 + total_score * 2
+def confidence_score(score, risk, expected_return):
+    confidence = 45 + score * 4
 
     if expected_return > 0.05:
         confidence += 5
@@ -478,11 +311,6 @@ def confidence_score(total_score, risk, expected_return, news_score):
         confidence += 5
     elif risk == "High":
         confidence -= 15
-
-    if news_score > 0.25:
-        confidence += 4
-    elif news_score < -0.25:
-        confidence -= 8
 
     return int(max(35, min(90, confidence)))
 
@@ -585,45 +413,27 @@ def analyze_stock(ticker, horizon_days, term_type):
     if df.empty:
         return None, "Not enough data after indicators."
 
-    fundamentals, fund_error = load_fundamentals(ticker)
-    news_df, news_score, news_label = load_news_sentiment(ticker)
-
-    estimate_df, expected_return, forecast_label = estimate_future_price(df, horizon_days)
     latest = df.iloc[-1]
 
-    tech_score, risk, tech_reasons = technical_score_only(latest, term_type)
-    fund_score, fund_reasons = fundamental_score_only(fundamentals)
+    score, risk, reasons = score_stock(latest, term_type)
+    estimate_df, expected_return, forecast_label = estimate_future_price(df, horizon_days)
 
-    forecast_score = 2 if expected_return >= 0.05 else -2 if expected_return <= -0.05 else 0
-    news_component = 2 if news_score > 0.25 else -2 if news_score < -0.25 else 0
-
-    total_score = tech_score + fund_score + forecast_score + news_component
-
-    signal = final_signal(total_score, risk, news_score, expected_return, term_type)
-    confidence = confidence_score(total_score, risk, expected_return, news_score)
+    signal = final_signal(score, risk, expected_return, term_type)
+    confidence = confidence_score(score, risk, expected_return)
     plan_df = trade_plan(latest, signal, confidence, expected_return, horizon_days)
 
     return {
         "df": df,
         "latest": latest,
-        "fundamentals": fundamentals,
-        "fund_error": fund_error,
-        "news_df": news_df,
-        "news_score": news_score,
-        "news_label": news_label,
+        "score": score,
+        "risk": risk,
+        "reasons": reasons,
         "estimate_df": estimate_df,
         "expected_return": expected_return,
         "forecast_label": forecast_label,
-        "tech_score": tech_score,
-        "fund_score": fund_score,
-        "forecast_score": forecast_score,
-        "news_component": news_component,
-        "total_score": total_score,
-        "risk": risk,
         "signal": signal,
         "confidence": confidence,
-        "plan_df": plan_df,
-        "reasons": tech_reasons + fund_reasons
+        "plan_df": plan_df
     }, ""
 
 
@@ -649,13 +459,9 @@ horizon_days = st.sidebar.selectbox(
 
 scan_count = st.sidebar.selectbox(
     "How many stocks to scan?",
-    [5, 10, 25, 50, 100, 250],
+    [5, 10, 25, 50, 100],
     index=1
 )
-
-if not ALPHA_KEY:
-    st.error("ALPHA_VANTAGE_API_KEY is missing. Add it in Streamlit Secrets.")
-    st.stop()
 
 tab1, tab2, tab3 = st.tabs(["Single Stock", "Scanner", "Ticker List"])
 
@@ -710,40 +516,14 @@ with tab1:
 
         st.markdown("### Score Breakdown")
         score_df = pd.DataFrame({
-            "Category": ["Technical", "Fundamental", "Forecast", "News", "Total"],
-            "Score": [
-                result["tech_score"],
-                result["fund_score"],
-                result["forecast_score"],
-                result["news_component"],
-                result["total_score"]
-            ]
+            "Category": ["Technical Score", "Total Score"],
+            "Score": [result["score"], result["score"]]
         })
         st.dataframe(score_df, use_container_width=True)
 
         st.markdown("### Why This Signal?")
         for r in result["reasons"]:
             st.write(f"- {r}")
-
-        st.markdown("### Fundamentals")
-        if result["fundamentals"]:
-            st.dataframe(
-                pd.DataFrame({
-                    "Metric": list(result["fundamentals"].keys()),
-                    "Value": list(result["fundamentals"].values())
-                }),
-                use_container_width=True
-            )
-        else:
-            st.warning(f"Fundamentals unavailable. {result['fund_error']}")
-
-        st.markdown("### Recent News")
-        st.write(f"News Sentiment: {result['news_label']}")
-
-        if result["news_df"].empty:
-            st.warning("No recent news loaded.")
-        else:
-            st.dataframe(result["news_df"], use_container_width=True)
 
 with tab2:
     st.subheader("Scanner")
@@ -765,10 +545,7 @@ with tab2:
                 "Risk": result["risk"],
                 "Confidence": result["confidence"],
                 "Expected Return %": round(result["expected_return"] * 100, 2),
-                "Technical Score": result["tech_score"],
-                "Fundamental Score": result["fund_score"],
-                "News": result["news_label"],
-                "Total Score": result["total_score"]
+                "Score": result["score"]
             })
 
         progress.progress((i + 1) / len(selected_scan))
@@ -785,16 +562,15 @@ with tab2:
             "📉 Long-Term Buy on Dip": 3,
             "⏳ Hold / Wait": 4,
             "⏳ Long-Term Hold / Watch": 4,
-            "⚠️ Avoid / Negative News": 5,
-            "⚠️ Avoid / High Risk": 6,
-            "🔻 Sell / High Caution": 7,
-            "⚠️ Avoid Long-Term": 8
+            "⚠️ Avoid / High Risk": 5,
+            "🔻 Sell / High Caution": 6,
+            "⚠️ Avoid Long-Term": 7
         }
 
         scanner_df["Sort"] = scanner_df["Signal"].map(order).fillna(9)
 
         scanner_df = scanner_df.sort_values(
-            ["Sort", "Confidence", "Total Score"],
+            ["Sort", "Confidence", "Score"],
             ascending=[True, False, False]
         ).drop(columns=["Sort"])
 
