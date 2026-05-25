@@ -10,6 +10,8 @@ import plotly.graph_objects as go
 
 from datetime import datetime, timedelta
 
+from io import StringIO
+
 
 
 st.set_page_config(page_title="AI Trading Signal App", layout="wide")
@@ -30,11 +32,11 @@ FINNHUB_API_KEY = st.secrets.get("FINNHUB_API_KEY", "")
 
 TICKERS = [
 
-    "AAPL","MSFT","NVDA","AMZN","GOOGL",
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL",
 
-    "META","TSLA","NFLX","AMD","SPY",
+    "META", "TSLA", "NFLX", "AMD", "SPY",
 
-    "QQQ","PLTR","SMCI","AVGO","CRM"
+    "QQQ", "PLTR", "SMCI", "AVGO", "CRM"
 
 ]
 
@@ -58,33 +60,13 @@ def safe_num(x, default=0):
 
 @st.cache_data(ttl=600)
 
-def load_price_data(ticker, resolution="D", days=365):
-
-
+def load_price_data(ticker, days=365):
 
     try:
 
-        end_time = int(datetime.now().timestamp())
+        stooq_symbol = ticker.lower() + ".us"
 
-        start_time = int((datetime.now() - timedelta(days=days)).timestamp())
-
-
-
-        url = (
-
-            f"https://finnhub.io/api/v1/stock/candle"
-
-            f"?symbol={ticker}"
-
-            f"&resolution={resolution}"
-
-            f"&from={start_time}"
-
-            f"&to={end_time}"
-
-            f"&token={FINNHUB_API_KEY}"
-
-        )
+        url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=d"
 
 
 
@@ -98,41 +80,31 @@ def load_price_data(ticker, resolution="D", days=365):
 
 
 
-        data = response.json()
+        df = pd.read_csv(StringIO(response.text))
 
 
 
-        if data.get("s") != "ok":
+        if df.empty or "Close" not in df.columns:
 
-            return pd.DataFrame(), "No data returned"
-
-
-
-        df = pd.DataFrame({
-
-            "Date": pd.to_datetime(data["t"], unit="s"),
-
-            "Open": data["o"],
-
-            "High": data["h"],
-
-            "Low": data["l"],
-
-            "Close": data["c"],
-
-            "Volume": data["v"]
-
-        })
+            return pd.DataFrame(), "No price data returned from Stooq"
 
 
 
-        df = df.dropna()
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+        df = df.dropna(subset=["Date", "Close"])
+
+
+
+        cutoff = datetime.now() - timedelta(days=days)
+
+        df = df[df["Date"] >= cutoff]
 
 
 
         if df.empty:
 
-            return pd.DataFrame(), "Empty dataframe"
+            return pd.DataFrame(), "Empty dataframe after filtering"
 
 
 
@@ -148,29 +120,23 @@ def load_price_data(ticker, resolution="D", days=365):
 
 def add_indicators(df):
 
-
-
     df = df.copy()
 
 
 
     df["Return"] = df["Close"].pct_change()
 
+    df["MA9"] = df["Close"].rolling(9, min_periods=3).mean()
 
+    df["MA20"] = df["Close"].rolling(20, min_periods=5).mean()
 
-    df["MA9"] = df["Close"].rolling(9).mean()
+    df["MA50"] = df["Close"].rolling(50, min_periods=10).mean()
 
-    df["MA20"] = df["Close"].rolling(20).mean()
-
-    df["MA50"] = df["Close"].rolling(50).mean()
-
-    df["MA200"] = df["Close"].rolling(200).mean()
+    df["MA200"] = df["Close"].rolling(200, min_periods=20).mean()
 
 
 
     delta = df["Close"].diff()
-
-
 
     gain = delta.where(delta > 0, 0)
 
@@ -178,15 +144,13 @@ def add_indicators(df):
 
 
 
-    avg_gain = gain.rolling(14).mean()
+    avg_gain = gain.rolling(14, min_periods=5).mean()
 
-    avg_loss = loss.rolling(14).mean()
+    avg_loss = loss.rolling(14, min_periods=5).mean()
 
 
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
-
-
 
     df["RSI"] = 100 - (100 / (1 + rs))
 
@@ -214,29 +178,19 @@ def add_indicators(df):
 
     df["TR"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-
-
-    df["ATR"] = df["TR"].rolling(14).mean()
-
-
-
-    df["Support"] = df["Close"].rolling(30).min()
-
-    df["Resistance"] = df["Close"].rolling(30).max()
+    df["ATR"] = df["TR"].rolling(14, min_periods=5).mean()
 
 
 
-    df["Volatility"] = (
+    df["Support"] = df["Close"].rolling(30, min_periods=5).min()
 
-        df["Return"].rolling(20).std() * np.sqrt(252)
+    df["Resistance"] = df["Close"].rolling(30, min_periods=5).max()
 
-    )
+    df["Volatility"] = df["Return"].rolling(20, min_periods=5).std() * np.sqrt(252)
 
 
 
     df = df.replace([np.inf, -np.inf], np.nan)
-
-
 
     df = df.ffill().bfill()
 
@@ -299,8 +253,6 @@ def load_fundamentals(ticker):
     except Exception as e:
 
         return {}, str(e)
-
-
 
 
 
@@ -576,8 +528,6 @@ def technical_score_only(latest):
 
 
 
-
-
 def fundamental_score_only(fundamentals):
 
     score = 0
@@ -639,8 +589,6 @@ def fundamental_score_only(fundamentals):
 
 
     return score, reasons
-
-
 
 
 
@@ -736,8 +684,6 @@ def estimate_future_price(df, days):
 
 
 
-
-
 def final_signal(total_score, risk, news_score, expected_return):
 
     if risk == "High":
@@ -767,8 +713,6 @@ def final_signal(total_score, risk, news_score, expected_return):
     else:
 
         return "Sell / High Caution"
-
-
 
 
 
@@ -809,8 +753,6 @@ def confidence_score(total_score, risk, expected_return, news_score):
 
 
     return int(max(35, min(90, confidence)))
-
-
 
 
 
@@ -952,11 +894,9 @@ def make_price_chart(df, ticker):
 
 
 
-
-
 def analyze_stock(ticker, horizon_days):
 
-    df, price_error = load_price_data(ticker, resolution="D", days=365)
+    df, price_error = load_price_data(ticker, days=365)
 
 
 
@@ -1062,8 +1002,6 @@ def analyze_stock(ticker, horizon_days):
 
 
 
-
-
 st.sidebar.header("Settings")
 
 
@@ -1096,17 +1034,7 @@ scan_count = st.sidebar.selectbox(
 
 
 
-if not FINNHUB_API_KEY:
-
-    st.error("FINNHUB_API_KEY is missing. Add it in Streamlit Secrets.")
-
-    st.stop()
-
-
-
 tab1, tab2, tab3 = st.tabs(["Single Stock", "Scanner", "Ticker List"])
-
-
 
 
 
@@ -1168,19 +1096,7 @@ with tab1:
 
         score_df = pd.DataFrame({
 
-            "Category": [
-
-                "Technical",
-
-                "Fundamental",
-
-                "Forecast",
-
-                "News",
-
-                "Total"
-
-            ],
+            "Category": ["Technical", "Fundamental", "Forecast", "News", "Total"],
 
             "Score": [
 
@@ -1247,8 +1163,6 @@ with tab1:
         else:
 
             st.dataframe(result["news_df"], use_container_width=True)
-
-
 
 
 
@@ -1368,15 +1282,9 @@ with tab2:
 
 
 
-
-
 with tab3:
 
     st.subheader("Ticker List")
 
     st.dataframe(pd.DataFrame({"Ticker": TICKERS}), use_container_width=True)
-
-
-
-
 
